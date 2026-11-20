@@ -41,6 +41,35 @@ double bench_seq(size_t n_bytes) {
     return ns / (REPEAT * (double)n_bytes); /* ns/byte */
 }
 
+/* Acceso aleatorio usando indices pre-mezclados (Fisher-Yates).
+ * Cada acceso salta a una posicion impredecible: se pierde la localidad
+ * espacial y el prefetch. Devuelve ns por acceso (un acceso = un int). */
+double bench_rand(size_t n_bytes) {
+    size_t n = n_bytes / sizeof(int);
+    int *arr = (int *)malloc(n * sizeof(int));
+    size_t *idx = (size_t *)malloc(n * sizeof(size_t));
+    if (!arr || !idx) return -1.0;
+
+    for (size_t i = 0; i < n; i++) { arr[i] = i; idx[i] = i; }
+    /* Mezcla Fisher-Yates */
+    for (size_t i = n - 1; i > 0; i--) {
+        size_t j = rand() % (i + 1);
+        size_t tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
+    }
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    volatile long sum = 0;
+    for (int r = 0; r < REPEAT; r++)
+        for (size_t i = 0; i < n; i++)
+            sum += arr[idx[i]];
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+
+    free(arr); free(idx);
+    double ns = (t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec);
+    return ns / (REPEAT * (double)n);       /* ns/acceso */
+}
+
 int main(void) {
     size_t sizes[] = {
         4 * KB, 8 * KB, 16 * KB, 32 * KB,           /* region L1 */
@@ -50,10 +79,12 @@ int main(void) {
     };
 
     int n = sizeof(sizes) / sizeof(sizes[0]);
-    printf("%-12s %10s\n", "Array (KB)", "ns/byte");
+    printf("%-12s %14s %14s\n", "Array (KB)", "seq ns/acceso", "rand ns/acceso");
     for (int i = 0; i < n; i++) {
-        double lat = bench_seq(sizes[i]);
-        printf("%-12zu %10.3f\n", sizes[i] / 1024, lat);
+        double seq  = bench_seq(sizes[i]);
+        double rnd  = bench_rand(sizes[i]);
+        printf("%-12zu %14.3f %14.3f\n", sizes[i] / 1024, seq, rnd);
+        fflush(stdout);
     }
 
     return 0;

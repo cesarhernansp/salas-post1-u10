@@ -113,3 +113,44 @@ Los puntos de transición esperados según el checkpoint 1 son 32 KB (fin de L1d
 
 ![Compilación de cache_bench](capturas/p1_cp2_compilacion.png)
 ![Tabla de latencia secuencial](capturas/p1_cp2_tabla_secuencial.png)
+
+## Paso 3 — Acceso aleatorio frente a secuencial (`bench_rand`)
+
+El acceso aleatorio destruye la localidad espacial. `bench_rand` reserva un array de `int`, un vector de índices `idx` que se mezcla con Fisher–Yates y recorre el array en el orden de `idx` (`sum += arr[idx[i]]`). Devuelve ns por acceso, donde un acceso es la lectura de un `int`. `main()` ejecuta ahora `bench_seq` y `bench_rand` con los mismos tamaños y los imprime en dos columnas. Ambos se miden por acceso, uno por byte y el otro por `int`, de modo que son comparables como "tiempo por lectura".
+
+```
+gcc -O0 -o cache_bench cache_bench.c && ./cache_bench
+```
+
+**Condiciones de medida.** Las corridas del Paso 2 se hicieron antes de conectar el portátil a la corriente. Durante un intento posterior la VM llegó a registrar un `soft lockup` de CPU y las medidas se dispararon, así que el estudiante conectó el cargador y repitió el experimento esperando a que cada corrida terminara antes de usar la consola. Los datos de este paso salen de tres corridas con el portátil conectado; la columna secuencial resulta mucho más estable que en el Paso 2 (0.47 a 0.53 ns para todos los tamaños de 16 KB en adelante), lo que confirma que el ruido de los arrays de 4 y 8 KB del Paso 2 venía de la máquina y no de la caché.
+
+### Resultados (promedio de tres corridas, ns por acceso)
+
+| Array (KB) | Región | Secuencial | Aleatorio | Aleatorio / secuencial |
+|---|---|---|---|---|
+| 4 | L1 | 0.528 | 2.300 | 4.4 |
+| 8 | L1 | 0.735 | 1.723 | 2.3 |
+| 16 | L1 | 0.588 | 1.619 | 2.8 |
+| 32 | L1 (límite) | 0.528 | 1.550 | 2.9 |
+| 64 | L2 | 0.535 | 1.481 | 2.8 |
+| 128 | L2 | 0.506 | 1.742 | 3.4 |
+| 256 | L2 | 0.516 | 1.592 | 3.1 |
+| 512 | L2 | 0.528 | 1.545 | 2.9 |
+| 1024 | L2 | 0.477 | 1.448 | 3.0 |
+| 4096 | L2 (límite) | 0.486 | 1.830 | 3.8 |
+| 16384 | RAM | 0.484 | 5.984 | 12.4 |
+| 65536 | RAM | 0.476 | 7.789 | 16.4 |
+
+El valor de 4 KB aleatorio (2.300) lo infla una sola corrida atípica (3.741 ns); las otras dos dan 1.572 y 1.586.
+
+### Interpretación
+
+- **Secuencial: sin saltos.** El costo se mantiene en torno a 0.5 ns por byte desde 4 KB hasta 64 MB. Se explica por la localidad espacial y el prefetch: el patrón es completamente predecible y el procesador trae las líneas por adelantado.
+- **Aleatorio: dos escalones.** Hasta 1 MB el costo es de unos 1.5 ns por acceso, unas tres veces el secuencial, y se mantiene casi plano mientras el array cabe en la L2 de 4 MB. Al pasar a 16 MB sube a casi 6 ns y a 64 MB a casi 8 ns, entre 12 y 16 veces el secuencial. En el aleatorio cada acceso es probablemente una línea distinta, por lo que ya no se amortiza el fallo de caché entre 16 lecturas (una línea de 64 B contiene 16 `int`) ni intervienen los prefetchers.
+- **Qué se atribuye a cache miss y qué a TLB miss.** El salto de 4 MB a 16 MB coincide con salir de la L2 detectada en el checkpoint 1 (4 MB), y se atribuye a *cache miss* (los datos se sirven desde un nivel inferior de la jerarquía). Al mismo tiempo, 16 MB equivale a 4096 páginas de 4 KB, más de las que cubre el TLB, de modo que cada acceso aleatorio paga además una traducción que ya no está en el TLB (*TLB miss*, con recorrido de la tabla de páginas). El pequeño aumento de 1 MB a 4 MB (1.45 a 1.83 ns) apunta a que el TLB de primer nivel ya no basta. Con este experimento no se pueden separar del todo ambos efectos, porque el array crece en los dos sentidos a la vez; la caída de rendimiento medida es la suma de los dos.
+- **Escalón sin una L3 visible.** La VM no expone L3, así que el único límite claro es el de la L2 (4 MB). El aumento de 16 MB a 64 MB (de 6.0 a 7.8 ns) se atribuye a que la jerarquía física del anfitrión sigue contando con niveles más profundos y con la RAM.
+
+**Checkpoint 3.** La comparativa muestra que el acceso aleatorio tiene una latencia significativamente mayor para arrays que superan la caché (hasta 16 veces la secuencial), y la interpretación anterior atribuye cada salto a cache miss o TLB miss.
+
+![Compilación de cache_bench con bench_rand](capturas/p1_cp3_compilacion.png)
+![Secuencial frente a aleatorio](capturas/p1_cp3_seq_vs_rand.png)
