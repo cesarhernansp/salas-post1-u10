@@ -235,3 +235,49 @@ El secuencial y el stride son insensibles al flag; el aleatorio a 64 MB es un 7 
 ![Decisión sobre el prefetch](capturas/p1_cp5_decision_prefetch.png)
 ![Instrucciones prefetch según el flag](capturas/p1_cp5_prefetch_flags.png)
 ![Funciones con prefetch](capturas/p1_cp5_prefetch_funciones.png)
+
+---
+
+# Parte 2 — Análisis de memoria virtual en Linux
+
+El directorio de trabajo de esta parte es `~/u10post2/` dentro de la VM y `u10post2/` en el repositorio. Se usa el mismo entorno de la Parte 1 (Alpine Linux, `gcc` 15.2.0, musl); el usuario es `root`, de modo que `sudo` no hace falta para leer `/proc`.
+
+## Paso 1 — Mapa de memoria virtual de un proceso (`mymaps.c`)
+
+`mymaps.c` reserva 1 MB con `malloc`, imprime el PID y las direcciones de una variable de pila, del bloque del heap, de una variable global (`.data`) y de una cadena constante (`.rodata`, agregada a la guía), y se detiene en `getchar()`. Así el proceso sigue vivo mientras se lee su mapa en `/proc/PID/maps`.
+
+```
+gcc -o mymaps mymaps.c && ./mymaps &
+PID=$!
+cat /proc/$PID/maps
+kill $PID
+```
+
+**El proceso debe seguir vivo.** Ejecutado en segundo plano desde la consola interactiva, `getchar()` intenta leer de la terminal y el shell detiene el proceso (`Stopped (tty input)`): sigue existiendo, por lo que `/proc/$PID` permanece disponible. Por la misma razón, `kill $PID` por sí solo no basta, porque un proceso detenido no atiende `SIGTERM` hasta que continúa, y se envía además `kill -CONT $PID`. Tras eso, `/proc/$PID` desaparece (`No such file or directory`).
+
+### Mapa anotado (PID 2263)
+
+| Rango de direcciones | Permisos | Mapeo | Región y propósito |
+|---|---|---|---|
+| `557e94ceb000-557e94cec000` | `r--p` | `/root/u10post2/mymaps` | Cabecera del ejecutable ELF, de solo lectura |
+| `557e94cec000-557e94ced000` | `r-xp` | `mymaps` | **Texto (`.text`)**: el código de `main`; es ejecutable y no se puede modificar |
+| `557e94ced000-557e94cee000` | `r--p` | `mymaps` | **`.rodata`**: constantes como la cadena `"hola"` (`rodata addr` = `0x557e94ced000`) |
+| `557e94cee000-557e94cef000` | `r--p` | `mymaps` | Datos reubicados que se protegen tras la carga (relro) |
+| `557e94cef000-557e94cf0000` | `rw-p` | `mymaps` | **Datos (`.data`/`.bss`)**: variables globales; `global_data` está en `0x557e94cef008` |
+| `557ec101a000-557ec101c000` | `---p` y `rw-p` | `[heap]` | **Heap clásico** (`brk`), con una página de guarda sin permisos |
+| `7fed86c1c000-7fed86d1d000` | `rw-p` | anónimo | **El bloque de 1 MB** (`heap addr` = `0x7fed86c1c020`): musl atiende las reservas grandes con `mmap`, no con `brk`; el tamaño es 1 MB más una página de cabecera |
+| `7fed86d1d000-7fed86d23000` | `r--p` | `[vvar]`, `[vvar_vclock]` | Datos del kernel que se exponen al proceso (por ejemplo, el reloj) |
+| `7fed86d23000-7fed86d25000` | `r-xp` | `[vdso]` | **vDSO**: código del kernel mapeado en el proceso para llamadas rápidas como `clock_gettime` sin entrar al kernel |
+| `7fed86d25000-7fed86dca000` | `r--p`, `r-xp`, `r--p`, `r--p`, `rw-p` | `/lib/ld-musl-x86_64.so.1` | **Librería de C y cargador dinámico**: en musl, `libc` y el cargador (`ld`) son el mismo archivo (en glibc serían `libc.so` y `ld-linux.so`) |
+| `7fed86dca000-7fed86dcd000` | `rw-p` | anónimo | Datos anónimos de la librería (por ejemplo, su `.bss`) |
+| `7fff5efbb000-7fff5efdc000` | `rw-p` | `[stack]` | **Pila**: variables locales; `stack var addr` = `0x7fff5efd9f00` está dentro de esta región |
+
+**Cómo leer los permisos.** `r` es lectura, `w` escritura y `x` ejecución. La cuarta letra es `p` (privada: copy-on-write, los cambios no se comparten) o `s` (compartida). Los segmentos de código son `r-xp` y no `rw`, de modo que el sistema impide escribir en el código; los datos son `rw-p` y no `x`, de modo que no se puede ejecutar la pila ni el heap.
+
+**Direcciones.** Las direcciones cambian en cada ejecución por la aleatorización del espacio de direcciones (ASLR), y el ejecutable se carga en `0x55...` por ser un binario PIE. Cada dirección impresa por el programa cae dentro de la región esperada: la de pila en `[stack]`, la del heap en el bloque anónimo de 1 MB, la global en el `rw-p` del ejecutable y la `rodata` en su `r--p`.
+
+**Checkpoint 1.** Se identifican al menos seis regiones distintas: texto, datos, heap, librería de C (musl), pila y vDSO, con sus permisos y su propósito.
+
+![Compilación de mymaps](capturas/p2_cp1_compilacion.png)
+![Mapa de memoria del proceso](capturas/p2_cp1_maps.png)
+![Proceso terminado con kill](capturas/p2_cp1_proceso_terminado.png)
