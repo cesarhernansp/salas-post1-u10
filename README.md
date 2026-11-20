@@ -195,3 +195,43 @@ Aun así, el experimento sí confirma el punto que pide el checkpoint desde otro
 
 ![Compilación con bench_stride](capturas/p1_cp4_compilacion.png)
 ![Comparación de stride 64 B y 4096 B](capturas/p1_cp4_stride.png)
+
+## Paso 5 — Decisión técnica: ¿qué stride expone mejor los conflictos de asociatividad en esta caché?
+
+<!-- decision-1:inicio -->
+El stride que garantiza que todos los accesos de `bench_stride` caigan en el mismo set es el tamaño total de la caché dividido entre su asociatividad: en la L1d detectada, 32 KB / 8 vías = 4096 bytes, que coincide aquí con el tamaño de página. Con líneas de 64 B y 64 sets, los bits 0 a 5 de la dirección son el desplazamiento dentro de la línea y los bits 6 a 11 son el índice de set; un stride de 4096 B (2^12) no modifica ninguno de esos bits, así que las 256 direcciones de un array de 1 MB comparten el mismo set de 8 líneas. Con un stride de 2048 B cambiaría el bit 11 en cada acceso, y los accesos alternarían entre dos sets distintos: para el mismo número de accesos, cada set recibiría la mitad y habría menos conflicto por set, pero no desaparecería. A partir del noveno acceso dentro de un mismo set, cada línea nueva desaloja a una de las 8 presentes por la política de reemplazo, de modo que al volver a recorrer el array cada acceso falla en L1 y se resuelve desde L2, un nivel más lento. En las mediciones del laboratorio ese acceso cuesta unos 2.4 ns, frente a unos 0.5 ns del acceso secuencial del checkpoint 2, donde 63 de cada 64 lecturas aciertan en L1. Comparar contra el stride de 64 B no aísla el conflicto, porque ese recorrido también falla en L1 en cada acceso: por eso, en esta máquina, los dos strides dieron una latencia casi idéntica.
+<!-- decision-1:fin -->
+
+## Paso 6 — Decisión técnica: ¿`-fno-prefetch-loop-arrays` deshabilita el mismo prefetching que el prefetcher de hardware?
+
+<!-- decision-2:inicio -->
+No: `-fno-prefetch-loop-arrays` solo actúa sobre las instrucciones de prefetch por software que el propio compilador decide insertar en el código generado, y no tiene ningún efecto sobre el prefetcher de hardware, que vive dentro del procesador, detecta patrones en tiempo de ejecución y opera de forma independiente del binario. En principio el patrón secuencial es el más sensible a la diferencia, porque es el más predecible para un mecanismo de prefetch, mientras que el aleatorio y el de stride de 4096 B, cuyas direcciones dependen de una mezcla Fisher–Yates o de un módulo, no pueden anticiparse en tiempo de compilación. Al medirlo en este laboratorio el resultado fue más matizado. Con `-O2`, gcc insertó 5 instrucciones `prefetcht0` con `-fprefetch-loop-arrays` y ninguna con `-fno-prefetch-loop-arrays`, todas dentro de `bench_rand` y ninguna en `bench_seq` ni en `bench_stride`. El secuencial salió igual con ambos flags (0.13 ns por acceso, con diferencias de menos del 10 %, dentro del ruido), porque sus lecturas `volatile` no reciben prefetch del compilador y el prefetcher de hardware ya cubre ese patrón. El aleatorio a 64 MB mejoró entre un 7 % y un 9 % con el flag (alrededor de 4.9 ns frente a 5.2 y 5.3 ns), porque gcc solo puede adelantar lecturas secuenciales, como el recorrido del vector de índices, y no el acceso aleatorio al array. El stride de 4096 B no cambió. Como el prefetcher de hardware no se puede desactivar de forma portable desde gcc, la conclusión válida pero limitada es que comparar ambos flags mide solo la contribución del prefetch por software del compilador, nunca la del prefetching total del procesador.
+<!-- decision-2:fin -->
+
+### Comprobación del Paso 6: prefetch por software con `-O2`
+
+Para apoyar la decisión anterior se compiló `cache_bench.c` con `-O2` y cada uno de los dos flags, y se contaron las instrucciones `prefetch` del ensamblador (`gcc ... -S`):
+
+| Compilación | Instrucciones `prefetch` |
+|---|---|
+| `-O2 -fprefetch-loop-arrays` | 5 (todas `prefetcht0`, dentro de `bench_rand`) |
+| `-O2 -fno-prefetch-loop-arrays` | 0 |
+| `-O3 -fprefetch-loop-arrays` | 4 |
+
+Después se ejecutó cada binario dos veces, alternándolos (ns por acceso):
+
+| Corrida | Secuencial 64 MB | Aleatorio 16 MB | Aleatorio 64 MB | Stride 64 B | Stride 4096 B |
+|---|---|---|---|---|---|
+| Con prefetch 1 | 0.141 | 3.164 | 4.938 | 2.509 | 2.336 |
+| Sin prefetch 1 | 0.136 | 3.135 | 5.213 | 2.444 | 2.330 |
+| Con prefetch 2 | 0.135 | 3.100 | 4.840 | 2.358 | 2.326 |
+| Sin prefetch 2 | 0.137 | 3.219 | 5.297 | 2.367 | 2.331 |
+
+El secuencial y el stride son insensibles al flag; el aleatorio a 64 MB es un 7 a 9 % más rápido con el prefetch por software. A 16 MB la diferencia no es apreciable. Las tablas completas de la corrida con `-O2` mostraron además que, sin la barrera de `-O0`, el secuencial baja a unos 0.13 ns por acceso.
+
+**Checkpoint 5.** Las dos decisiones técnicas de la Parte 1 (Pasos 5 y 6) están incluidas arriba, con 264 y 265 palabras (mínimo 100). La primera calcula el stride que maximiza los conflictos a partir de la geometría detectada (32 KB / 8 vías = 4096 B); la segunda distingue el prefetch por software del compilador del prefetcher de hardware y reconoce el alcance limitado de comparar solo los flags de gcc.
+
+![Decisión sobre el stride](capturas/p1_cp5_decision_stride.png)
+![Decisión sobre el prefetch](capturas/p1_cp5_decision_prefetch.png)
+![Instrucciones prefetch según el flag](capturas/p1_cp5_prefetch_flags.png)
+![Funciones con prefetch](capturas/p1_cp5_prefetch_funciones.png)
