@@ -367,3 +367,51 @@ La guía anticipa **25 600 faults** (100 MB / 4 KB). Eso es lo que se obtiene co
 ![VmRSS antes y después del memset](capturas/p2_cp3_vmrss.png)
 ![time -v con THP activo](capturas/p2_cp3_time_v.png)
 ![time -v con páginas de 4 KB](capturas/p2_cp3_sin_thp.png)
+
+## Paso 4 — Costo de un page fault individual con `mmap` y `clock_gettime` (`mmap_fault_cost.c`)
+
+El Paso 3 mide el efecto agregado de miles de page faults. Este paso aísla el costo de uno solo. `mmap_fault_cost.c` crea con `mmap` un mapeo anónimo (`MAP_PRIVATE | MAP_ANONYMOUS`) de 200 páginas de 4096 bytes; el kernel solo reserva direcciones virtuales y no asigna marcos físicos. Para cada página, el programa:
+
+1. **Primer toque:** mide con `clock_gettime(CLOCK_MONOTONIC)` una escritura `page[0] = 1`. La página aún no tiene marco físico, así que la escritura provoca un minor page fault: trap al kernel, asignación de un marco puesto a cero, actualización de la tabla de páginas y retorno.
+2. **Segundo toque:** mide `page[0] = 2` sobre la misma página, que ya está mapeada: no hay fault.
+
+Al final imprime el promedio de cada toque y la diferencia (*overhead* atribuible al fault). Restar el segundo toque del primero cancela el costo de las dos llamadas a `clock_gettime`, que está incluido en ambas medidas.
+
+```
+gcc -o mmap_fault_cost mmap_fault_cost.c && ./mmap_fault_cost
+```
+
+### Resultados
+
+Diez ejecuciones consecutivas (ns, promedio de las 200 páginas de cada ejecución):
+
+| Ejecución | Primer toque (con fault) | Segundo toque (sin fault) | Overhead del page fault |
+|---|---|---|---|
+| 1 | 1792.1 | 32.5 | 1759.6 |
+| 2 | 40892.5 | 35.0 | 40857.5 |
+| 3 | 2945.8 | 34.5 | 2911.2 |
+| 4 | 3911.5 | 34.3 | 3877.2 |
+| 5 | 3814.2 | 34.6 | 3779.5 |
+| 6 | 7492.3 | 32.6 | 7459.7 |
+| 7 | 2247.5 | 34.4 | 2213.1 |
+| 8 | 3155.4 | 31.8 | 3123.6 |
+| 9 | 2807.3 | 34.7 | 2772.6 |
+| 10 | 7152.1 | 34.8 | 7117.3 |
+
+| Estadístico del overhead | Valor |
+|---|---|
+| Mínimo | 1759.6 ns |
+| Mediana | 3451.6 ns |
+| Promedio sin la ejecución atípica (la 2) | 3890.4 ns |
+
+### Interpretación
+
+- **El primer toque cuesta mucho más que el segundo en las diez ejecuciones.** El segundo toque es estable, en torno a 34 ns (casi todo es el costo de las dos lecturas del reloj), mientras que el primero tarda entre 1.8 y 7.5 µs, con un valor atípico de 40.9 µs. El overhead es **positivo y consistente** en todas las ejecuciones, de modo que lo que se mide es el page fault y no ruido.
+- **Orden de magnitud.** Un minor page fault cuesta del orden de **3 µs** en esta VM (mediana de 3.45 µs). En la Parte 1 el acceso aleatorio a un array de 64 MB, que ya no cabe en caché, costó unos 7.8 ns por acceso: el fault es unas **440 veces** más caro (225 veces con su mejor ejecución). Esa cifra de la Parte 1 es un tiempo medio por acceso con varios accesos solapados; frente a una latencia de DRAM de unos 100 ns, valor típico que no se midió aquí, el fault sigue siendo entre 18 y 35 veces más caro. Es decir, **un fault es dos órdenes de magnitud más costoso que un acceso a RAM**, porque implica entrar al kernel, buscar y poner a cero un marco y modificar las tablas de páginas.
+- **Variación.** Los valores dispersos (de 1.8 a 40.9 µs) se explican por la virtualización: bajo un hipervisor, un fault del invitado puede provocar además un fallo de la traducción anidada de direcciones del anfitrión, y el procesador físico se comparte con Windows. Por eso se reportan la mínima y la mediana, y no solo el promedio.
+
+**Checkpoint 4.** `mmap_fault_cost.c` reporta un costo promedio del primer toque consistentemente mayor que el del segundo sobre las mismas 200 páginas; el overhead atribuible al page fault es de unos 3.5 µs (mediana) y se compara con la latencia de acceso a RAM de la Parte 1 como unas 440 veces mayor.
+
+![Compilación de mmap_fault_cost](capturas/p2_cp4_compilacion.png)
+![Una ejecución de mmap_fault_cost](capturas/p2_cp4_costo_fault.png)
+![Diez ejecuciones consecutivas](capturas/p2_cp4_diez_corridas.png)
