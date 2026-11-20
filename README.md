@@ -154,3 +154,44 @@ El valor de 4 KB aleatorio (2.300) lo infla una sola corrida atípica (3.741 ns)
 
 ![Compilación de cache_bench con bench_rand](capturas/p1_cp3_compilacion.png)
 ![Secuencial frente a aleatorio](capturas/p1_cp3_seq_vs_rand.png)
+
+## Paso 4 — Benchmark con stride para exponer conflictos de asociatividad (`bench_stride`)
+
+Con un stride fijo (salto constante entre direcciones consecutivas), si el stride coincide con *tamaño de la caché / número de vías*, todos los accesos caen en el mismo set y compiten por sus vías, produciendo *conflict misses* aunque el array completo quepa en la caché. `bench_stride(n_bytes, stride)` recorre el array con `arr[(i * stride) % n_bytes]` y devuelve ns por acceso. `main()` la invoca sobre un array de **1 MB** (que cabe en la L2 de 4 MB detectada en el checkpoint 1) con dos strides:
+
+| Stride | Qué representa |
+|---|---|
+| 64 B | Tamaño de una línea de caché: cada acceso toca la línea siguiente |
+| 4096 B | Tamaño de página: 32 KB (L1d) / 8 vías = 4096 B, así que todas las direcciones comparten el mismo set de la L1 |
+
+```
+gcc -O0 -o cache_bench cache_bench.c && ./cache_bench
+```
+
+### Resultados (ns por acceso, array de 1 MB)
+
+Se ejecutó el programa cinco veces. La quinta es la de la captura.
+
+| Stride | Corrida 1 | Corrida 2 | Corrida 3 | Corrida 4 | Corrida 5 | Promedio |
+|---|---|---|---|---|---|---|
+| 64 B | 2.504 | 2.509 | 2.399 | 2.403 | 2.490 | 2.461 |
+| 4096 B | 2.356 | 2.368 | 2.367 | 2.361 | 2.445 | 2.379 |
+
+**Corridas descartadas.** Al preparar la captura se hicieron otras corridas que no se incluyen: en una la VM registró un `watchdog: BUG: soft lockup` (la CPU virtual estuvo detenida unos 25 s) y en otras la tabla secuencial/aleatoria salió con valores altos y desordenados. Sus valores de stride (entre 2.36 y 2.83 ns) no cambian la conclusión. Para la corrida de la captura se dejó la ventana de la VM en primer plano.
+
+### Interpretación
+
+**La diferencia que anticipa la guía no se observó en esta máquina.** Con el mismo array de 1 MB, el stride de 4096 B cuesta 2.38 ns por acceso, y el de 64 B, 2.46 ns, es decir, prácticamente lo mismo (la diferencia es de un 3 %, dentro de la variación entre corridas). La guía esperaba un stride de 4096 B "claramente mayor". Razones por las que no aparece:
+
+- **El stride de 64 B no es "secuencial dentro de la línea".** Con un salto de 64 B cada acceso cae en una línea nueva, de modo que el recorrido toca 16 384 líneas (1 MB) y sale de la L1 de 32 KB en cada acceso. Es un patrón con fallo de L1 constante, aunque muy predecible y favorecido por el prefetch, que sirve cada línea desde la L2.
+- **El stride de 4096 B también falla en L1, pero con menos líneas.** Toca solo 256 líneas (16 KB) y, como todas comparten set, la L1 de 8 vías no puede retenerlas: cada acceso se sirve también desde la L2.
+- **Ambos patrones se resuelven en la L2.** Los dos pagan un fallo de L1 por acceso y un acierto de L2, así que su latencia es parecida. Lo que la guía describe como "se resuelve desde un nivel más lento" solo se cumpliría si la L2 no pudiera absorber esos accesos.
+- **El costo del bucle con `-O0` enmascara las diferencias.** Cada acceso incluye un producto y un módulo de 64 bits (`(i * stride) % n_bytes`), operaciones de varios nanosegundos que forman un piso común a los dos experimentos.
+- **Hay pocos accesos.** Con stride de 4096 B son solo 256 por pasada (25 600 en total), unas decenas de microsegundos de medición.
+
+Aun así, el experimento sí confirma el punto que pide el checkpoint desde otro ángulo: ambos recorridos operan sobre el **mismo array de 1 MB**, de manera que cualquier diferencia entre ellos no podría atribuirse a un tamaño de trabajo distinto. Aquí la diferencia es nula, no por falta de conflictos de asociatividad, sino porque el nivel inferior (L2) los absorbe con una latencia comparable a la de los fallos secuenciales.
+
+**Checkpoint 4.** `bench_stride` compila y mide, pero **no se reproduce la latencia claramente mayor del stride de 4096 B**; el estudiante lo documenta tal como se observó y lo explica con la latencia similar de L2 en ambos patrones y con el costo fijo del bucle.
+
+![Compilación con bench_stride](capturas/p1_cp4_compilacion.png)
+![Comparación de stride 64 B y 4096 B](capturas/p1_cp4_stride.png)

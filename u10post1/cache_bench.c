@@ -70,6 +70,29 @@ double bench_rand(size_t n_bytes) {
     return ns / (REPEAT * (double)n);       /* ns/acceso */
 }
 
+/* Acceso con stride fijo: expone conflictos de asociatividad.
+ * Si el stride es (tamano de cache / numero de vias), todos los accesos caen
+ * en el mismo set y compiten por sus vias. Devuelve ns por acceso. */
+double bench_stride(size_t n_bytes, size_t stride) {
+    volatile char *arr = (volatile char *)malloc(n_bytes);
+    if (!arr) return -1.0;
+    memset((void *)arr, 1, n_bytes);
+
+    size_t steps = n_bytes / stride;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    for (int r = 0; r < REPEAT; r++)
+        for (size_t i = 0; i < steps; i++)
+            (void)arr[(i * stride) % n_bytes];
+
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    free((void *)arr);
+
+    double ns = (t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec);
+    return ns / (REPEAT * (double)steps);   /* ns/acceso */
+}
+
 int main(void) {
     size_t sizes[] = {
         4 * KB, 8 * KB, 16 * KB, 32 * KB,           /* region L1 */
@@ -86,6 +109,15 @@ int main(void) {
         printf("%-12zu %14.3f %14.3f\n", sizes[i] / 1024, seq, rnd);
         fflush(stdout);
     }
+
+    /* Stride sobre 1 MB (cabe en la L2 de 4 MB detectada en el checkpoint 1).
+     * 64 B   = una linea de cache.
+     * 4096 B = tamano de pagina = 32 KB (L1d) / 8 vias: mismo set de la L1. */
+    printf("\n%-12s %10s\n", "Stride", "ns/acceso");
+    double t_line = bench_stride(1 * MB, 64);
+    double t_page = bench_stride(1 * MB, 4096);
+    printf("%-12s %10.3f\n", "64 B", t_line);
+    printf("%-12s %10.3f\n", "4096 B", t_page);
 
     return 0;
 }
