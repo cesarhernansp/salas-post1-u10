@@ -33,7 +33,7 @@ Los archivos `.c` se escriben en el anfitrión, dentro de este repositorio, y la
 salas-post1-u10/
 ├── README.md
 ├── u10post1/       # Parte 1: cache_bench.c
-├── u10post2/       # Parte 2: mymaps.c, pagefault_demo.c, mmap_fault_cost.c
+├── u10post2/       # Parte 2: mymaps.c, pagefault_demo.c, mmap_fault_cost.c y auxiliares
 └── capturas/       # capturas de la consola de la VM, nombradas pN_cpM_descripcion.png
 ```
 
@@ -470,3 +470,41 @@ gcc -DPOPULATE -o mmap_populate mmap_fault_cost.c
 
 ![Decisión sobre smaps y pmap -x](capturas/p2_cp5_decision_smaps_pmap.png)
 ![Decisión sobre MAP_POPULATE](capturas/p2_cp5_decision_populate.png)
+
+---
+
+# Resumen de la entrega
+
+## Archivos
+
+| Parte | Archivo | Descripción | Checkpoint |
+|---|---|---|---|
+| 1 | `u10post1/cache_bench.c` | Benchmark de caché: `bench_seq`, `bench_rand` y `bench_stride` | 2, 3 y 4 |
+| 2 | `u10post2/mymaps.c` | Mapa de memoria con `/proc/PID/maps` | 1 |
+| 2 | `u10post2/pagefault_demo.c` | `VmRSS` y conteo de page faults | 3 |
+| 2 | `u10post2/mmap_fault_cost.c` | Costo de un minor page fault con `mmap` | 4 |
+| 2 | `u10post2/smaps_resumen.sh` | Auxiliar: resumen de `smaps` por región | 2 |
+| 2 | `u10post2/muchos_mapeos.c`, `costo_lectura.sh` | Auxiliares: proceso con 1000 regiones y medición del costo de lectura | 5 |
+
+Los checkpoints 1 de la Parte 1 (detección de caché) y 5 de cada parte (decisiones técnicas) no tienen programa propio. Las capturas, 33 en total, son de la consola de la VM y están en `capturas/`, con al menos dos por checkpoint.
+
+## Diferencias respecto a la guía
+
+| Tema | Lo que anticipa la guía | Lo observado | Causa |
+|---|---|---|---|
+| Sistema | Ubuntu 20.04 o equivalente | Alpine 3.24 en una VM live | Se reutilizó el ISO disponible; usa musl, no glibc |
+| Caché L3 | L1, L2 y L3 detectables | Solo L1d 32 KB y L2 4 MB | La VM no expone la L3 |
+| Secuencial (P1, Paso 2) | Saltos en L1, L2 y L3 | Latencia plana (≈0.5 ns/byte) | Localidad espacial, prefetch de hardware y costo del bucle con `-O0` |
+| Stride (P1, Paso 4) | 4096 B claramente más lento que 64 B | Casi iguales (2.38 y 2.46 ns) | Ambos fallan en L1 y se resuelven desde L2 |
+| `-fno-prefetch-loop-arrays` (P1, Paso 6) | Secuencial el más sensible | Solo el aleatorio cambia (7 a 9 %) | gcc solo insertó prefetch en `bench_rand` |
+| `smaps` de libc (P2, Paso 2) | `Shared_Clean` | `Shared_Dirty` | La raíz de la VM live es `tmpfs` |
+| `pagefault_demo` (P2, Paso 3) | 25 600 minor faults | 564 con THP activo; 25 602 con páginas de 4 KB | Páginas enormes transparentes en `always` |
+| `pmap -x` (P2, Paso 5) | Resumen liviano para monitoreo | Más costoso que leer `smaps` | Procesa y formatea los datos, además de arrancar un proceso |
+
+**Correcciones al código de la guía:** `pagefault_demo.c` usa el PID real en lugar de `/proc/self` dentro de `system()`, porque `self` sería el `grep` y no el programa; `mymaps.c` se termina con `kill` y `kill -CONT`, porque un proceso detenido por la terminal no atiende `SIGTERM`.
+
+## Limitaciones
+
+- Las medidas se hicieron dentro de una VM, que comparte el procesador con Windows. Durante algunas corridas de la Parte 1 la VM registró un `soft lockup` y se descartaron; el estudiante conectó el portátil a la corriente y dejó la ventana de la VM en primer plano para las corridas que se reportan. Los valores absolutos (por ejemplo, el costo de un page fault) son propios de este entorno, y los de la Parte 1 se reportan con varias corridas.
+- La VM arranca en modo *live*: todo vive en RAM y los paquetes se instalan en cada arranque. Los resultados guardados son los de este repositorio.
+- Los comandos se enviaron a la VM con `VBoxManage controlvm keyboardputstring` y las capturas con `controlvm screenshotpng`, de modo que solo contienen la pantalla de la VM.
