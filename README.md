@@ -72,3 +72,44 @@ Además de los tamaños, leyó la geometría de cada nivel (nivel, tipo, vías, 
 
 ![Tamaños de caché por nivel](capturas/p1_cp1_caches_sysfs.png)
 ![Geometría de la caché y lscpu](capturas/p1_cp1_caches_geometria.png)
+
+## Paso 2 — Benchmark de latencia por tamaño de array, acceso secuencial (`cache_bench.c`)
+
+`cache_bench.c` reserva un array de `n_bytes`, lo toca con `memset` antes de medir (para que las páginas ya estén en RAM) y lo recorre secuencialmente 100 veces (`REPEAT`) leyendo un byte por iteración. El tiempo se mide con `clock_gettime(CLOCK_MONOTONIC)` y se reporta en **ns por byte**. El puntero es `volatile` y el programa se compila con `-O0`, para que el compilador no elimine unas lecturas que no tienen efecto observable. Los tamaños se expresan con las constantes `KB` y `MB`, agrupados con un comentario por nivel de caché.
+
+```
+gcc -O0 -o cache_bench cache_bench.c && ./cache_bench
+```
+
+### Resultados
+
+Se ejecutó el benchmark tres veces seguidas (ns/byte). La primera es la de la captura.
+
+| Array (KB) | Región | Corrida 1 | Corrida 2 | Corrida 3 | Promedio |
+|---|---|---|---|---|---|
+| 4 | L1 | 0.865 | 2.838 | 1.421 | 1.708 |
+| 8 | L1 | 0.706 | 1.145 | 1.351 | 1.067 |
+| 16 | L1 | 0.648 | 1.242 | 0.518 | 0.803 |
+| 32 | L1 (límite) | 0.656 | 1.070 | 0.663 | 0.796 |
+| 64 | L2 | 0.703 | 1.025 | 0.736 | 0.821 |
+| 128 | L2 | 0.655 | 0.877 | 0.567 | 0.700 |
+| 256 | L2 | 0.671 | 0.719 | 0.528 | 0.639 |
+| 512 | L2 | 0.669 | 0.724 | 0.535 | 0.643 |
+| 1024 | L2 | 0.672 | 0.720 | 0.540 | 0.644 |
+| 4096 | L2 (límite) / L3 | 0.559 | 0.639 | 0.588 | 0.595 |
+| 16384 | RAM | 0.536 | 0.549 | 0.543 | 0.543 |
+| 65536 | RAM | 0.540 | 0.580 | 0.553 | 0.558 |
+
+### Interpretación
+
+Los puntos de transición esperados según el checkpoint 1 son 32 KB (fin de L1d) y 4 MB (fin de L2). **En esta máquina no se observan los saltos de latencia que anticipa la guía**: el costo por byte es prácticamente constante, entre 0.5 y 0.9 ns, y las corridas más ruidosas solo muestran valores altos en los arrays más pequeños (4 y 8 KB), que se atribuyen al arranque en frío de la medición (la CPU todavía está subiendo de frecuencia y el kernel de la VM está atendiendo otras tareas), no a un efecto de la jerarquía de caché. Los valores incluso bajan ligeramente con el tamaño. Las causas más probables son:
+
+- **Localidad espacial.** Una línea de caché tiene 64 bytes y el recorrido es byte a byte, de modo que de cada 64 accesos solo uno cae en una línea nueva; el costo del fallo se reparte entre 64 lecturas.
+- **Prefetch de hardware.** Un recorrido secuencial es el patrón más fácil de predecir: el prefetcher del procesador trae las líneas siguientes antes de que se pidan, y oculta la latencia de L2, L3 y RAM.
+- **Costo del propio bucle con `-O0`.** Sin optimización, cada iteración carga y guarda `i` y `n_bytes` en la pila además de leer el byte `volatile`. Ese costo fijo, del orden de medio nanosegundo por byte, es mayor que lo que aporta el nivel de memoria desde el que se sirve cada línea.
+- **Entorno virtualizado.** La VM presenta su propia jerarquía de caché y comparte el procesador físico con Windows, lo que añade ruido a las medidas.
+
+**Checkpoint 2.** El programa compila sin errores con `gcc -O0` y mide la latencia secuencial con `clock_gettime`, pero la tabla **no muestra saltos discernibles** que se correspondan con L1, L2 y L3. El estudiante lo documenta tal como se observó y lo explica con la localidad espacial y el prefetching, en lugar de forzar un resultado.
+
+![Compilación de cache_bench](capturas/p1_cp2_compilacion.png)
+![Tabla de latencia secuencial](capturas/p1_cp2_tabla_secuencial.png)
