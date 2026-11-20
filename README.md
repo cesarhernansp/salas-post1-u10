@@ -281,3 +281,48 @@ kill $PID
 ![Compilación de mymaps](capturas/p2_cp1_compilacion.png)
 ![Mapa de memoria del proceso](capturas/p2_cp1_maps.png)
 ![Proceso terminado con kill](capturas/p2_cp1_proceso_terminado.png)
+
+## Paso 2 — Análisis detallado con `/proc/PID/smaps` y `pmap`
+
+`smaps` amplía `maps` con estadísticas por región: tamaño reservado (`Size`), páginas en RAM (`Rss`), páginas compartidas (`Shared_Clean`, `Shared_Dirty`), privadas (`Private_Clean`, `Private_Dirty`) y accedidas (`Referenced`). El volcado completo (`cat /proc/$$/smaps | head -60`) no cabe en una pantalla de la consola de la VM, de modo que se escribió un auxiliar de lectura, `u10post2/smaps_resumen.sh`, que imprime una fila por región con esos campos. El proceso analizado es el propio shell (`$$`, PID 1980, el `sh` de BusyBox).
+
+```
+echo "PID del shell: $$"; pmap -x $$
+sh smaps_resumen.sh $$
+vmstat -s | head -15
+free -h
+```
+
+### Resumen de `smaps` del shell (KB)
+
+| Perm | Mapeo | Size | Rss | Sh_Clean | Sh_Dirty | Pr_Clean | Pr_Dirty | Ref |
+|---|---|---|---|---|---|---|---|---|
+| `r-xp` | `/bin/busybox` | 612 | 320 | 0 | 228 | 0 | 92 | 320 |
+| `rw-p` | `/bin/busybox` | 4 | 4 | 0 | 0 | 0 | 4 | 4 |
+| `rw-p` | `[heap]` | 4 | 4 | 0 | 0 | 0 | 4 | 4 |
+| `rw-p` | `[anon]` | 96 | 96 | 0 | 0 | 0 | 96 | 96 |
+| `r-xp` | `[vdso]` | 8 | 4 | 4 | 0 | 0 | 0 | 4 |
+| `r-xp` | `/lib/ld-musl-x86_64.so.1` | 356 | 356 | 0 | 356 | 0 | 0 | 356 |
+| `r--p` | `/lib/ld-musl-x86_64.so.1` | 216 | 124 | 0 | 116 | 0 | 8 | 124 |
+| `rw-p` | `[stack]` | 132 | 72 | 0 | 0 | 0 | 72 | 72 |
+
+`pmap -x` reporta el mismo conjunto de regiones con las columnas `Kbytes`, `RSS` y `Dirty`, y un total de 1732 KB mapeados, 1256 KB en RAM y 1252 KB sucios. Las regiones con mayor RSS son el código de la librería de C (356 KB), el código de BusyBox (320 KB), los datos de solo lectura de la librería (124 KB) y la pila (72 KB). `pmap -x` no distingue entre sucias compartidas y privadas, ni muestra `Referenced`; eso solo está en `smaps`.
+
+### Clasificación de páginas
+
+Las dos etiquetas son independientes. *Private* o *Shared* depende de cuántos procesos mapean la misma página física; *Clean* o *Dirty* depende de si la página fue modificada respecto a su copia de respaldo.
+
+- **Private_Dirty: la pila y la memoria anónima.** `[stack]` tiene 72 KB en RAM, todos `Private_Dirty`, y la región anónima de 96 KB también. Son privadas porque cada proceso tiene su propia pila y sus propias variables, nadie más las mapea; son sucias porque el proceso las escribió y no existe un archivo que las respalde, de modo que no se pueden descartar sin perder datos. Aplican igual al heap.
+- **Shared_Clean: el vDSO.** `[vdso]` es la única región `Shared_Clean` de esta lista (4 KB): son páginas del kernel que todos los procesos comparten y que nunca se modifican.
+- **La librería de C no aparece como `Shared_Clean`, sino como `Shared_Dirty` (356 KB).** Con esta VM arrancada desde el ISO en modo *live*, el sistema de archivos raíz es `tmpfs`, es decir, vive en la RAM (la captura de `mount` lo confirma). Las páginas de `ld-musl` (que es la librería de C) están compartidas entre muchos procesos, pero al residir en un sistema de archivos que no tiene copia en disco se consideran sucias: no hay respaldo con el que estén "limpias". En una instalación en disco, esas mismas páginas de código serían `Shared_Clean`: están compartidas y coinciden con el archivo de la librería, por lo que el kernel puede descartarlas y releerlas en cualquier momento. Esta es una diferencia con el resultado anticipado por la guía, que se atribuye al entorno y no al análisis.
+
+### Uso de memoria del sistema
+
+`vmstat -s` y `free -h` muestran 2 019 000 KB de memoria total (1.9 GiB), 431 MiB usados, 1.3 GiB libres y **0 de swap**, así que en este sistema no hay swap y las páginas no pueden ir a disco. La columna `shared` de `free` (214 MiB) corresponde en su mayor parte al sistema de archivos `tmpfs` que contiene la raíz.
+
+**Checkpoint 2.** Se documentan regiones `Private_Dirty` (pila, memoria anónima, heap) con su explicación, y una región `Shared_Clean` (el vDSO); la librería de C aparece `Shared_Dirty` por estar en `tmpfs`, y se explica la diferencia respecto a una instalación en disco.
+
+![pmap -x del shell](capturas/p2_cp2_pmap.png)
+![Resumen de smaps por región](capturas/p2_cp2_smaps_resumen.png)
+![La raíz de la VM es tmpfs](capturas/p2_cp2_raiz_tmpfs.png)
+![vmstat y free](capturas/p2_cp2_vmstat_free.png)
