@@ -326,3 +326,44 @@ Las dos etiquetas son independientes. *Private* o *Shared* depende de cuántos p
 ![Resumen de smaps por región](capturas/p2_cp2_smaps_resumen.png)
 ![La raíz de la VM es tmpfs](capturas/p2_cp2_raiz_tmpfs.png)
 ![vmstat y free](capturas/p2_cp2_vmstat_free.png)
+
+## Paso 3 — Observar page faults en tiempo real (`pagefault_demo.c`)
+
+El kernel cuenta los page faults de cada proceso (`minflt` y `majflt`). Un *minor fault* ocurre cuando la página puede resolverse sin leer del disco (por ejemplo, asignar un marco de RAM puesto a cero la primera vez que se toca una página anónima, o copy-on-write); un *major fault* exige leer del disco o de swap.
+
+`pagefault_demo.c` reserva 100 MB con `malloc`, imprime los campos `VmPeak`, `VmSize` y `VmRSS` de su propio `/proc/PID/status`, escribe un byte en cada página con `memset` y vuelve a imprimirlos. Además muestra los minor faults acumulados que lee con `getrusage`.
+
+**Corrección respecto a la guía.** La guía usa `system("grep ... /proc/self/status")`, pero `system()` lanza un shell y un `grep`, y `/proc/self` dentro de ese `grep` es el propio `grep`, no el programa que se quiere medir: el `VmRSS` no cambiaría nunca. El programa construye la ruta con su PID real (`/proc/<pid>/status`). También se agregó `VmSize` al filtro, porque es el campo que muestra la memoria reservada.
+
+```
+gcc -o pagefault_demo pagefault_demo.c && ./pagefault_demo
+/usr/bin/time -v ./pagefault_demo
+gcc -DSIN_THP -o pagefault_4k pagefault_demo.c && /usr/bin/time -v ./pagefault_4k
+```
+
+### Resultados
+
+| Medida | Antes del `memset` | Después del `memset` |
+|---|---|---|
+| `VmSize` | 103 268 kB | 103 268 kB |
+| `VmPeak` | 103 268 kB | 103 268 kB |
+| `VmRSS` | 572 kB | 102 968 kB |
+
+- **`malloc()` no genera page faults inmediatos.** Antes del `memset` los 100 MB ya figuran como memoria reservada (`VmSize` = 103 268 kB, que son los 100 MB más lo que ocupa el proceso), pero casi nada está en RAM (`VmRSS` = 572 kB). `malloc` de un bloque tan grande hace un `mmap` anónimo que solo reserva direcciones virtuales: la asignación es diferida (*demand paging*) y el kernel no asocia marcos físicos hasta que el proceso toca cada página. Después del `memset`, `VmRSS` crece unos 102 400 kB, que equivalen a los 100 MB tocados.
+- **Major faults: 0.** `/usr/bin/time -v` reporta `Major (requiring I/O) page faults: 0`. No hay swap ni lectura de disco que resolver.
+
+### El conteo de minor faults y las páginas enormes (THP)
+
+| Ejecución | Minor faults durante el `memset` (`getrusage`) | `Minor (reclaiming a frame) page faults` de `time -v` | Tiempo de sistema |
+|---|---|---|---|
+| `./pagefault_demo` (THP activo, `always`) | 601 − 37 = **564** | 756 | 0.02 s |
+| `./pagefault_4k` (THP desactivado en el proceso) | 25 640 − 38 = **25 602** | 25 795 | 0.15 s |
+
+La guía anticipa **25 600 faults** (100 MB / 4 KB). Eso es lo que se obtiene con páginas de 4 KB (`pagefault_4k`: 25 602, la diferencia son unos pocos faults de la propia ejecución). Con la configuración por defecto de esta VM, las páginas enormes transparentes están en `[always]` (la captura lo muestra), y el kernel respalda la región con páginas de 2 MB cuando puede: bastan unas 50 resoluciones de fallo para cubrir 100 MB, y el resto son los faults del arranque del programa. Por eso el conteo es unas cincuenta veces menor y el tiempo de sistema, unas siete veces menor. La variante `-DSIN_THP` desactiva las páginas enormes únicamente para ese proceso con `prctl(PR_SET_THP_DISABLE)`, sin cambiar ningún ajuste del sistema. Los 37 a 40 faults previos al `memset` son los del arranque del proceso (carga del ejecutable y de la librería, `printf`).
+
+**Checkpoint 3.** `VmRSS` pasa de 572 kB a 102 968 kB tras el `memset`; `malloc` no genera faults inmediatos por la asignación diferida; y `/usr/bin/time -v` reporta 756 minor faults con THP (25 795 con páginas de 4 KB) y 0 major.
+
+![Compilación de pagefault_demo](capturas/p2_cp3_compilacion.png)
+![VmRSS antes y después del memset](capturas/p2_cp3_vmrss.png)
+![time -v con THP activo](capturas/p2_cp3_time_v.png)
+![time -v con páginas de 4 KB](capturas/p2_cp3_sin_thp.png)
