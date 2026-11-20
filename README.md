@@ -415,3 +415,58 @@ Diez ejecuciones consecutivas (ns, promedio de las 200 páginas de cada ejecuci�
 ![Compilación de mmap_fault_cost](capturas/p2_cp4_compilacion.png)
 ![Una ejecución de mmap_fault_cost](capturas/p2_cp4_costo_fault.png)
 ![Diez ejecuciones consecutivas](capturas/p2_cp4_diez_corridas.png)
+
+## Paso 5 — Decisión técnica: ¿`/proc/PID/smaps` o `pmap -x` para este análisis?
+
+<!-- decision-3:inicio -->
+Si el objetivo es solo saber cuánta RAM usa cada región mapeada, `pmap -x` lo reporta: sus columnas `Kbytes`, `RSS` y `Dirty` dan el tamaño reservado y las páginas residentes por región, como se vio en el checkpoint 2. Lo que `pmap -x` no expone es lo que `smaps` sí separa región por región: el campo `Referenced`, y la distinción entre `Private_Dirty`, `Private_Clean`, `Shared_Dirty` y `Shared_Clean`, que `pmap -x` resume en una única columna `Dirty`; por eso, para clasificar páginas como en el checkpoint 2, `smaps` es indispensable. Leer `smaps` cuesta más que leer `maps` cuando el proceso tiene muchas regiones: en un proceso con 1017 regiones cada lectura tardó unos 7.6 ms frente a 3.85 ms de `maps`, mientras que en el shell de 19 regiones no hubo diferencia. Esa diferencia importaría en un script que consulte la memoria de varios procesos cada segundo. La guía propone `pmap -x` como alternativa liviana, pero la medición no lo confirmó: `pmap -x` tardó unos 21 ms por llamada en el proceso grande, casi el triple que `smaps`, porque además de leer los datos arranca un proceso y los procesa. Para monitoreo frecuente conviene `maps` o `smaps_rollup`, que cuestan lo mismo que `maps` y dan totales de Rss y de páginas sucias. La ventaja de `pmap -x` es otra: en una inspección rápida por terminal entrega ya una tabla resumida, sin filtrar `smaps` a mano con `grep` o `awk`. Se prefiere leer `smaps` directamente cuando hay que distinguir el tipo de página.
+<!-- decision-3:fin -->
+
+### Medición de costos de lectura (`costo_lectura.sh`)
+
+Se midió el tiempo de 200 lecturas de cada fuente (segundos; incluye el arranque de `cat` o de `pmap` en cada lectura). El proceso grande se creó con el auxiliar `muchos_mapeos.c`, que genera cientos de regiones que el kernel no puede fusionar.
+
+| Fuente | Shell (19 regiones) | Proceso de 1017 regiones | Por lectura (1017 regiones) |
+|---|---|---|---|
+| `cat /proc/PID/maps` | 0.73 s | 0.77 s | 3.9 ms |
+| `cat /proc/PID/smaps` | 0.71 s | 1.52 s | 7.6 ms |
+| `cat /proc/PID/smaps_rollup` | 0.80 s | 0.73 s | 3.7 ms |
+| `pmap PID` | 1.22 s | 2.20 s | 11.0 ms |
+| `pmap -x PID` | 1.12 s | 4.24 s | 21.2 ms |
+
+![Regiones por proceso](capturas/p2_cp5_regiones_por_proceso.png)
+![Costo de lectura en el shell](capturas/p2_cp5_costo_pocas.png)
+![Costo de lectura en el proceso de 1017 regiones](capturas/p2_cp5_costo_muchas.png)
+
+## Paso 6 — Decisión técnica: ¿`mmap` con `MAP_POPULATE` o demand paging por defecto?
+
+<!-- decision-4:inicio -->
+Si `mmap_fault_cost.c` se modifica para agregar `MAP_POPULATE`, el tiempo medido en el primer toque de cada página baja a un valor cercano al del segundo toque, porque los page faults se pagan por adelantado dentro de la propia llamada a `mmap`. Se comprobó con una variante del programa: el primer toque pasó de una mediana de unos 3.0 µs a unos 48 ns, y el overhead atribuible al fault, a unos 13 ns, mientras que la llamada a `mmap` pasó de unos 3 µs a unos 197 µs. El costo no desaparece, se traslada. `MAP_POPULATE` conviene en un servidor que necesita latencia baja y predecible por petición, porque reserva y prepara los buffers al arrancar y ninguna petición paga un fault. El demand paging por defecto conviene a programas que reservan memoria de forma especulativa o generosa y no saben cuánto van a usar. Si un proceso reserva 100 MB pero solo toca 10 MB, el demand paging evita asignar y poner a cero 90 MB de marcos físicos y el tiempo de prepararlos, que `MAP_POPULATE` pagaría igualmente porque fuerza la asignación de todo el rango sin importar cuánto se use. Con los costos medidos, de unos 1 µs por página con `MAP_POPULATE` y unos 3 µs por fault individual, 100 MB serían unos 25 ms y 100 MB de RAM, frente a unos 8 ms y 10 MB si solo se tocan 10 MB con demand paging.
+<!-- decision-4:fin -->
+
+### Medición con `MAP_POPULATE` (`mmap_fault_cost.c`)
+
+`mmap_fault_cost.c` mide ahora también el tiempo de la llamada a `mmap`, y se compila una variante con `-DPOPULATE`. Diez ejecuciones de cada una (medianas; entre paréntesis, rango):
+
+| Medida | Demand paging | `MAP_POPULATE` |
+|---|---|---|
+| Llamada a `mmap` | 3.1 µs (2.0 a 13.3 µs) | 197 µs (167 a 986 µs) |
+| Primer toque | 3.0 µs (1.7 a 5.6 µs) | 48 ns (29 a 97 ns) |
+| Overhead atribuible al fault | 3.0 µs (1.7 a 5.6 µs) | 13 ns (9 a 63 ns) |
+| Costo total por página (mmap + primer toque) | unos 3 µs | unos 1 µs |
+
+Con `MAP_POPULATE` el fault ya no ocurre en el bucle: el primer toque cuesta lo mismo que el segundo (unos 34 ns de ruido del reloj más la escritura). Además, preparar las 200 páginas de una vez resultó más barato por página que 200 faults individuales (cada fault paga la entrada al kernel y el retorno), siempre que se vayan a usar todas.
+
+```
+gcc -o mmap_fault_cost mmap_fault_cost.c
+gcc -DPOPULATE -o mmap_populate mmap_fault_cost.c
+./mmap_fault_cost; ./mmap_populate
+```
+
+![Compilación de las dos variantes](capturas/p2_cp5_populate_compilacion.png)
+![Demand paging frente a MAP_POPULATE](capturas/p2_cp5_populate_comparacion.png)
+
+**Checkpoint 5.** Las dos decisiones técnicas de la Parte 2 (Pasos 5 y 6) están incluidas arriba, con 250 y 238 palabras (mínimo 100). La primera distingue el nivel de detalle de `smaps` frente al resumen de `pmap -x` y, con una medición propia, cuándo conviene cada fuente según el escenario de monitoreo. La segunda explica el efecto de `MAP_POPULATE` sobre el costo medido en `mmap_fault_cost.c` y el desperdicio que evita el demand paging por defecto.
+
+![Decisión sobre smaps y pmap -x](capturas/p2_cp5_decision_smaps_pmap.png)
+![Decisión sobre MAP_POPULATE](capturas/p2_cp5_decision_populate.png)
